@@ -1,0 +1,12 @@
+# Auto-generated runtime files
+agent/CHECKPOINT
+agent/LOCK
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
