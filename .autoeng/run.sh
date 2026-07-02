@@ -56,6 +56,32 @@ checkpoint_rollback() {
   log "rollback: reset to $cp"
 }
 
+set_control() { # new_state
+  sed "s/^CONTROL=.*/CONTROL=\"$1\"/" "$AE_DIR/config.sh" > "$AE_DIR/config.sh.tmp"
+  mv "$AE_DIR/config.sh.tmp" "$AE_DIR/config.sh"
+  log "control set to '$1'"
+}
+
+run_gates() { # returns 0 if all configured gates pass
+  for pair in "build:$GATE_BUILD" "lint:$GATE_LINT" "test:$GATE_TEST"; do
+    name="${pair%%:*}"; cmd="${pair#*:}"
+    [ -n "$cmd" ] || { log "gate $name: skipped (unconfigured)"; continue; }
+    if sh -c "$cmd" >/dev/null 2>&1; then
+      log "gate $name: pass"
+    else
+      log "gate $name: FAIL — command: $cmd"
+      return 1
+    fi
+  done
+  return 0
+}
+
+invoke_executor() {
+  [ -n "$EXECUTOR" ] || { log "ERROR: EXECUTOR is empty — set it in config.sh"; return 1; }
+  log "invoking executor: $EXECUTOR"
+  sh -c "$EXECUTOR"
+}
+
 cmd_run() {
   cd "$PROJECT_ROOT"
   load_config
@@ -65,11 +91,19 @@ cmd_run() {
   fi
   lock_acquire || return 0
   checkpoint_create
-  log "control enabled — starting cycle (executor not yet wired)"
-  # NOTE: temporary marker so lock tests can observe execution; removed in Task 6.
-  [ "${FE_MARKER:-0}" = 1 ] && : > "$AE_DIR/EXECUTOR_RAN"
-  lock_release
-  return 0
+
+  if ! invoke_executor; then
+    log "executor error — rolling back"
+    checkpoint_rollback; set_control "failed"; lock_release; return 1
+  fi
+
+  if run_gates; then
+    log "gate passed — cycle complete"
+    lock_release; return 0
+  else
+    log "gate failed — rolling back to checkpoint"
+    checkpoint_rollback; set_control "failed"; lock_release; return 1
+  fi
 }
 
 main() {
