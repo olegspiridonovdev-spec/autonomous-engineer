@@ -17,6 +17,28 @@ load_config() {
   : "${CONTROL:=paused}"; : "${LOCK_STALE_MIN:=30}"; : "${CYCLE_TIMEOUT_MIN:=15}"
 }
 
+now_epoch() { date +%s; }
+
+lock_acquire() {
+  LOCK="$AE_DIR/LOCK"
+  if [ -f "$LOCK" ]; then
+    lock_epoch="$(grep '^epoch:' "$LOCK" 2>/dev/null | awk '{print $2}')"
+    [ -n "${lock_epoch:-}" ] || lock_epoch=0
+    age_min=$(( ( $(now_epoch) - lock_epoch ) / 60 ))
+    if [ "$age_min" -lt "$LOCK_STALE_MIN" ]; then
+      log "LOCK present (age ${age_min}m) — another run is active, exiting"
+      return 1
+    fi
+    log "stale lock (age ${age_min}m >= ${LOCK_STALE_MIN}m) — recovering"
+    rm -f "$LOCK"
+  fi
+  printf 'LOCKED\nepoch: %s\ntimestamp: %s\n' "$(now_epoch)" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK"
+  return 0
+}
+
+lock_release() { rm -f "$AE_DIR/LOCK"; }
+
 cmd_run() {
   cd "$PROJECT_ROOT"
   load_config
@@ -24,7 +46,11 @@ cmd_run() {
     log "control is '$CONTROL' — not enabled, skipping run"
     return 0
   fi
+  lock_acquire || return 0
   log "control enabled — starting cycle (executor not yet wired)"
+  # NOTE: temporary marker so lock tests can observe execution; removed in Task 6.
+  [ "${FE_MARKER:-0}" = 1 ] && : > "$AE_DIR/EXECUTOR_RAN"
+  lock_release
   return 0
 }
 
