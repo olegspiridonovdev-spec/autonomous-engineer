@@ -1,6 +1,4 @@
-# Auto-generated runtime files
-agent/CHECKPOINT
-agent/LOCK
+# Framework runtime artifacts are ignored by .autoeng/.gitignore.
 
 # OS files
 .DS_Store

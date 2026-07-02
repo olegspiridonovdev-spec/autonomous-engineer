@@ -1,0 +1,7 @@
+# Runtime artifacts created by run.sh — never commit these.
+LOCK
+CHECKPOINT
+execution.log
+# Test-only artifacts (present only in test sandboxes).
+FE_COUNT
+EXECUTOR_RAN

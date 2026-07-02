@@ -88,6 +88,7 @@ assert_contains() { # file substring message
 # Create an isolated git repo with .autoeng/ copied in and a test-friendly config.
 # Sets $SANDBOX to the repo path and cd's into it.
 setup_repo() {
+  [ -n "${SANDBOX:-}" ] && rm -rf "$SANDBOX"   # clean prior sandbox on repeated calls
   SANDBOX="$(mktemp -d)"
   cp -r "$REPO_ROOT/.autoeng" "$SANDBOX/.autoeng"
   cd "$SANDBOX" || exit 1
@@ -95,10 +96,13 @@ setup_repo() {
   git config user.email test@test.local
   git config user.name test
   echo "seed" > seed.txt
+  # Test scratch (redirected command output) must not dirty the sandbox tree.
+  printf 'out.log\n' > .gitignore
   git add -A && git commit -qm "seed"
   # Overwrite config for tests: executor = fake, gate = BUILD_OK sentinel.
+  # Single-quote the path so a space in REPO_ROOT survives later `sh -c "$EXECUTOR"`.
   cat > .autoeng/config.sh <<EOF
-EXECUTOR="sh $REPO_ROOT/tests/fake-executor.sh"
+EXECUTOR="sh '$REPO_ROOT/tests/fake-executor.sh'"
 GATE_BUILD="test -f BUILD_OK"
 GATE_LINT=""
 GATE_TEST=""
@@ -371,9 +375,11 @@ Create `tests/test_lock.sh`:
 # shellcheck disable=SC1091
 . ./helpers.sh
 
-# Case A: a fresh LOCK blocks the run.
+# Case A: a fresh LOCK blocks the run. Must write a fresh `epoch:` field —
+# lock_acquire keys staleness off epoch, so a timestamp-only lock parses as
+# epoch 0 and would be wrongly treated as stale.
 setup_repo
-printf 'LOCKED\ntimestamp: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > .autoeng/LOCK
+printf 'LOCKED\nepoch: %s\n' "$(date +%s)" > .autoeng/LOCK
 FE_MARKER=1 sh .autoeng/run.sh run > out.log 2>&1 || true
 assert_file_absent ".autoeng/EXECUTOR_RAN" "fresh lock blocks executor"
 assert_contains "out.log" "another run" "logs that a run is active"
@@ -428,7 +434,7 @@ Then update `cmd_run` — replace the `log "control enabled ..."` line with:
 ```sh
   lock_acquire || return 0
   log "control enabled — starting cycle (executor not yet wired)"
-  # NOTE: temporary marker so lock tests can observe execution; removed in Task 7.
+  # NOTE: temporary marker so lock tests can observe execution; removed in Task 6.
   [ "${FE_MARKER:-0}" = 1 ] && : > "$AE_DIR/EXECUTOR_RAN"
   lock_release
   return 0
@@ -481,7 +487,7 @@ teardown_repo
 exit "$TESTS_FAILED"
 ```
 
-(The first `setup_repo`'s teardown is handled by the second `setup_repo` reusing the process; final `teardown_repo` cleans up.)
+(`setup_repo` removes any prior sandbox as its first line, so the second call cleans up the first; the final `teardown_repo` removes the second.)
 
 - [ ] **Step 2: Run it to confirm it fails**
 
@@ -623,15 +629,29 @@ Now replace the body of `cmd_run` (everything after `checkpoint_create`) with th
 
 Remove the temporary `EXECUTOR_RAN` marker line and the "not yet wired" log. (Lock/checkpoint tests still pass because they no longer depend on the marker — verify in Step 4.)
 
-Because the marker is gone, update `tests/test_lock.sh` Case B to assert on the log instead of the marker: change `assert_file_exists ".autoeng/EXECUTOR_RAN" "stale lock recovered, executor ran"` to:
+Because the marker is gone, `tests/test_lock.sh` must assert on the log instead of the `EXECUTOR_RAN` file. Replace the ENTIRE contents of `tests/test_lock.sh` with this final version:
+
 ```sh
-assert_contains "out.log" "invoking executor" "stale lock recovered, executor ran"
-```
-and in Case A change `assert_file_absent ".autoeng/EXECUTOR_RAN" ...` to:
-```sh
+# shellcheck disable=SC1091
+. ./helpers.sh
+
+# Case A: a fresh LOCK blocks the run.
+setup_repo
+printf 'LOCKED\nepoch: %s\n' "$(date +%s)" > .autoeng/LOCK
+FE_MARKER=1 sh .autoeng/run.sh run > out.log 2>&1 || true
 assert_contains "out.log" "another run" "fresh lock blocks executor"
+teardown_repo
+
+# Case B: a stale LOCK (old epoch) is recovered and the run proceeds.
+setup_repo
+printf 'LOCKED\nepoch: 100\n' > .autoeng/LOCK   # epoch 100 = 1970, always stale
+FE_MARKER=1 sh .autoeng/run.sh run > out.log 2>&1 || true
+assert_contains "out.log" "invoking executor" "stale lock recovered, executor ran"
+assert_contains "out.log" "stale lock" "logs stale-lock recovery"
+teardown_repo
+
+exit "$TESTS_FAILED"
 ```
-(Case A already asserts that; keep a single assertion.) Set both fake-executor calls in `test_lock.sh` to use `FE_MARKER=1` still — harmless.
 
 - [ ] **Step 4: Run the tests to confirm they pass**
 
@@ -1268,4 +1288,18 @@ git commit -m "refactor: remove legacy 32-file agent/ framework; .autoeng/ is no
 - **Control-state single source of truth:** `CONTROL` lives only in `config.sh`; `set_control`/`cmd_pause`/`cmd_stop` all edit it via the same `sed` form; `load_config` re-reads it every cycle (Task 8 loop relies on this).
 - **Naming consistency:** `checkpoint_create`/`checkpoint_rollback`, `lock_acquire`/`lock_release`, `run_gates`, `invoke_executor`, `set_control`, `set_gate`, `cmd_run`/`cmd_loop`/`cmd_adopt`/`cmd_status`/`cmd_pause`/`cmd_stop` are used identically across every task that references them.
 - **Marker cleanup:** the temporary `EXECUTOR_RAN` marker introduced in Task 4 is removed in Task 6, and the two dependent assertions in `test_lock.sh` are migrated to log-based assertions in the same task.
+
+---
+
+## Post-review hardening (applied during execution)
+
+Adversarial code review of the Task 6 trust boundary surfaced three real defects that were fixed in commit `52b5378` (with regression tests). These deltas supersede the original Task 5/6 code blocks above:
+
+1. **Rollback must survive its own failure (Critical).** In `cmd_run`, both failure branches call `checkpoint_rollback || log "rollback FAILED — manual recovery may be needed"` so a non-zero rollback can't abort cleanup under `set -e`; `set_control "failed"` and `lock_release` always run.
+2. **Rollback must remove untracked leftovers (Critical).** `checkpoint_rollback` now runs `git clean -fd` after `git reset --hard` (respects `.gitignore`, so runtime artifacts are preserved), preventing executor-created untracked files from landing on the next cycle.
+3. **Land validated work (Important).** On gate success, `cmd_run` commits any remaining dirty tree (`git add -A && git commit -m "[autoeng] cycle result …"`) before releasing the lock, so gate-passing edits an executor left uncommitted are never silently lost.
+
+Test support added: `tests/fake-executor.sh` gained `FE_UNTRACKED` and `FE_EDIT_NOCOMMIT` knobs; `tests/test_gate_rollback.sh` gained a second case (untracked cleanup); `tests/test_land.sh` is new (landing-commit durability).
+
+Deferred as follow-ups (non-blocking, noted for a later pass): `set_control` does not verify its `sed` matched or escape non-enum values (Minor — current call sites pass fixed enum states); `run_gates` sends failing-gate output to `/dev/null` (Minor — operability: a failed gate logs *that* it failed but not *why*).
 ```
