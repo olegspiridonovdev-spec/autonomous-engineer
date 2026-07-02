@@ -124,6 +124,49 @@ cmd_loop() {
   done
 }
 
+set_gate() { # VAR value
+  sed "s|^$1=.*|$1=\"$2\"|" "$AE_DIR/config.sh" > "$AE_DIR/config.sh.tmp"
+  mv "$AE_DIR/config.sh.tmp" "$AE_DIR/config.sh"
+}
+
+cmd_adopt() {
+  cd "$PROJECT_ROOT"
+  if [ -f package.json ]; then
+    set_gate GATE_BUILD "npm run build"; set_gate GATE_LINT "npm run lint"; set_gate GATE_TEST "npm test"
+    detected="Node/npm"
+  elif [ -f Cargo.toml ]; then
+    set_gate GATE_BUILD "cargo build"; set_gate GATE_LINT "cargo clippy"; set_gate GATE_TEST "cargo test"
+    detected="Rust/cargo"
+  elif [ -f go.mod ]; then
+    set_gate GATE_BUILD "go build ./..."; set_gate GATE_LINT "go vet ./..."; set_gate GATE_TEST "go test ./..."
+    detected="Go"
+  elif [ -f pyproject.toml ]; then
+    set_gate GATE_BUILD ""; set_gate GATE_LINT "ruff check ."; set_gate GATE_TEST "pytest"
+    detected="Python"
+  else
+    detected="unknown (gates left blank — set them in config.sh)"
+  fi
+  log "adopt: detected stack: $detected"
+
+  cat > "$AE_DIR/STATE.md" <<EOF
+# Project State
+
+## Status
+Adopted $(date -u +%Y-%m-%d). Stack: $detected. Gates written to config.sh.
+
+## Next task
+Scan the repository, read any existing docs/ and TODO, and choose the highest-value
+next task per AGENT.md. Record it here before implementing.
+
+## Task queue
+- [ ] (to be populated by the first planning cycle)
+
+## Blockers
+(none)
+EOF
+  log "adopt: seeded STATE.md — set EXECUTOR and CONTROL=enabled in config.sh, then run: sh .autoeng/run.sh loop"
+}
+
 cmd_status() {
   cd "$PROJECT_ROOT"; load_config
   echo "control: $CONTROL"
@@ -142,6 +185,7 @@ main() {
     status) cmd_status "$@" ;;
     pause)  cmd_pause  "$@" ;;
     stop)   cmd_stop   "$@" ;;
+    adopt) cmd_adopt "$@" ;;
     *)    echo "usage: run.sh run|loop|adopt|status|pause|stop" >&2; exit 2 ;;
   esac
 }
