@@ -1,222 +1,206 @@
 # Autonomous Engineer — Portable Redesign
 
-**Date:** 2026-07-02
+**Date:** 2026-07-02 (revised same day after a "cut the fat" pass)
 **Status:** Approved design, ready for implementation planning
 **Author:** Oleg Spiridonov (with Claude Code)
 
 ---
 
-## Problem
+## The idea, in one paragraph
 
-The current framework is a strong *governance spec* — git checkpoints, LOCK, control flags, quality gates, failure recovery, diff-aware planning, and full traceability are well designed. But three things block the goal of *"drop into any project, drive it with any AI system, run a long autonomous cycle from start to finish."*
+A folder you drop into any repo. It contains **instructions the AI reads** plus **a thin loop that repeatedly wakes up whatever coding agent you already use** (Claude Code, aider+DeepSeek, OpenClaw, …) and tells it to do one safe unit of work. The framework owns only what a model can't be trusted to do itself — locking, git checkpoints, the on/off switch, and the loop. Everything else is markdown the agent reads. Lightweight, dependency-free, and agent-agnostic by construction.
 
-1. **No engine.** `agent/run.sh` doesn't invoke a model — it prints `RUNBOOK_TRIGGERED` and depends on the OpenClaw runtime to pick it up. It only runs inside OpenClaw. "Plug in Claude or DeepSeek" is impossible today because nothing calls a model.
-2. **Hardcoded to one environment.** `/mnt/c/Users/Oleg/.env.keys.txt`, Windows paths, and `npm run build` / `npx tsc` are baked in. Not portable across projects or stacks.
-3. **Too heavy.** The agent is instructed to read 32 documents every tick — expensive in tokens and a wall of complexity for a new adopter.
+## Design targets (the three tests every decision is measured against)
 
-## Goal
+1. **Lightweight** — few files, no runtime dependencies, nothing to install.
+2. **Easy to integrate into any existing system** — copy a folder, edit two lines, run one command.
+3. **Works on top of any agent** — the executor is a command string; no per-tool code.
 
-A framework a user can drop into **any** project (greenfield or existing), point at **any** AI system (Claude, DeepSeek, OpenAI, Ollama, …), and let it run a **long autonomous cycle** — preserving the existing safety/governance model while cutting complexity.
+## Problem with what exists today
 
-## Non-Goals
+The current framework is a strong *governance spec* (git checkpoints, LOCK, control flags, quality gates, failure recovery, diff-aware planning, traceability). But:
 
-- Building our own agent loop / tool-use / file-editing engine (raw model APIs can't edit files or run builds on their own). We deliberately lean on mature harnesses instead.
-- Rewriting or weakening any existing safety guarantee.
-- Language/stack-specific tooling beyond auto-detecting common gates.
-- A GUI, dashboard, or hosted service. State stays file-based and in-repo.
+1. **No engine.** `agent/run.sh` prints `RUNBOOK_TRIGGERED` and relies on the OpenClaw runtime. It only runs inside OpenClaw; nothing actually calls a model.
+2. **Hardcoded to one environment.** `/mnt/c/Users/Oleg/.env.keys.txt`, Windows paths, `npm run build` / `npx tsc` baked in.
+3. **Too heavy.** The agent is told to read 32 documents every tick.
 
----
+## Non-goals
 
-## Core Reframe: Two Layers
-
-The single idea behind the whole redesign: separate the **portable spec** from the **thin executor**.
-
-| Layer | What it is | Model-aware? |
-|-------|-----------|--------------|
-| **Spec** | Governance + workflow as markdown any AI reads | No — fully portable |
-| **Executor** | Config + adapter turning "run one cycle" into a concrete command for the chosen harness/model | Yes — the only model-aware part |
-
-Everything below follows from this split.
+- Building our own agent loop / tool-use / file-editing engine. Raw model APIs can't edit files or run builds; we lean on mature harnesses instead.
+- A globally-installed CLI, a package to publish, a GUI, or a hosted service.
+- Per-agent adapter code. The command string is the universal adapter.
+- Weakening any existing safety guarantee.
 
 ---
 
-## Design
+## Core reframe: two layers, one trust boundary
 
-### 1. File consolidation: 32 → ~5 + config
+Separate the **portable spec** (markdown any AI reads) from the **thin executor** (the command that runs a coding agent). The architecture is defined by *what runs where*:
 
-New layout (framework directory renamed `agent/` → `.autoeng/`):
+| Runs **outside** the model — `run.sh`, deterministic, trustworthy | Runs **inside** the model — the agent, via `AGENT.md` |
+|---|---|
+| Acquire LOCK (stale-lock recovery) | Read `STATE.md`, pick exactly **one** task |
+| Create pre-cycle git checkpoint | Implement it |
+| Check control flag; stop if not `enabled` | Run gates for fast feedback |
+| Invoke the executor (the agent) | Update `STATE.md` and `WORKLOG.md` |
+| **Re-run the gate commands itself**; on failure roll back to checkpoint and set `CONTROL=failed` | Commit the change |
+| Loop | |
+
+The key guarantee: a hallucinating or dishonest agent cannot lie its way past a gate, because `run.sh` re-runs the gates itself and rolls back on failure. That external verification is the whole reason `run.sh` exists.
+
+---
+
+## Files (3 markdown + 1 config + 1 script)
+
+Framework directory `agent/` → `.autoeng/`:
 
 ```
 your-project/
 ├── .autoeng/
-│   ├── CONSTITUTION.md   # immutable core rules + governance. ~1 page. The one file the agent may never edit. (was SYSTEM.md, trimmed)
-│   ├── AGENT.md          # operating manual: startup, planning, execution cycle, quality gate, self-review, failure recovery, termination. Merges ~12 files.
-│   ├── STATE.md          # mutable dashboard, updated every run: status + next task + queue + blockers + tech-debt + risks.
-│   ├── WORKLOG.md        # append-only journal (separate — it grows).
-│   ├── DECISIONS.md      # append-only decision log (separate — it grows).
-│   ├── config.yml        # the ONLY file a user must edit.
-│   └── lib/
-│       ├── checkpoint.sh
-│       ├── quality-gate.sh
-│       └── run.sh        # portable loop driver
+│   ├── AGENT.md      # immutable rules (top section) + workflow + planning + quality bar + recovery. Read each cycle.
+│   ├── STATE.md      # working memory: status, next task, queue, blockers. Rewritten each run.
+│   ├── WORKLOG.md    # append-only journal; decisions included as tagged entries.
+│   ├── config.sh     # sourced sh: EXECUTOR, GATE_*, CONTROL, timeouts.
+│   └── run.sh        # the only script. Subcommands + loop + all safety rails.
 └── ...your code
 ```
+
+Runtime artifacts (`LOCK`, `CHECKPOINT`, `execution.log`) live in `.autoeng/` and are git-ignored.
 
 **Mapping — every existing rule survives, nothing is dropped:**
 
 | New file | Absorbs |
 |----------|---------|
-| `CONSTITUTION.md` | `SYSTEM.md` (core principles, governance rules, authority hierarchy, control guarantees) |
-| `AGENT.md` | `AUTONOMOUS_ENGINEER.md`, `RUNBOOK.md`, `PLANNING_ENGINE.md`, `DIFF_PLANNING.md`, `EXECUTION_CYCLE.md`, `EXECUTION_RULES.md`, `TASK_SIZE_POLICY.md`, `QUALITY_GATE.md`, `REVIEW_CHECKLIST.md`, `SELF_REVIEW.md`, `CHECKLIST.md`, `FAILURE_RECOVERY.md`, `GIT_SAFETY.md`, `AUTONOMOUS_CONTROL.md`, `EXECUTION_TIMEOUT.md`, `TERMINATION_POLICY.md`, `FINAL_SHUTDOWN.md`, `SUCCESS_CRITERIA.md` |
+| `AGENT.md` | `SYSTEM.md` (as the immutable top section), `AUTONOMOUS_ENGINEER.md`, `RUNBOOK.md`, `PLANNING_ENGINE.md`, `DIFF_PLANNING.md`, `EXECUTION_CYCLE.md`, `EXECUTION_RULES.md`, `TASK_SIZE_POLICY.md`, `QUALITY_GATE.md`, `REVIEW_CHECKLIST.md`, `SELF_REVIEW.md`, `CHECKLIST.md`, `FAILURE_RECOVERY.md`, `GIT_SAFETY.md`, `AUTONOMOUS_CONTROL.md`, `EXECUTION_TIMEOUT.md`, `TERMINATION_POLICY.md`, `FINAL_SHUTDOWN.md`, `SUCCESS_CRITERIA.md` |
 | `STATE.md` | `PROJECT_STATUS.md`, `NEXT_TASK.md`, `TASK_QUEUE.md`, `BLOCKERS.md`, `TECH_DEBT.md`, `RISK_REGISTER.md` |
-| `WORKLOG.md` | `WORKLOG.md` (unchanged, append-only) |
-| `DECISIONS.md` | `DECISIONS.md` (unchanged, append-only) |
-| `config.yml` | `CONTROL_FLAGS.md` (state), `CRON_SETUP.md` (schedule), all hardcoded commands/paths |
-| `lib/` | `CHECKPOINT_MANAGER.sh`, `run.sh`, quality-gate commands |
+| `WORKLOG.md` | `WORKLOG.md` + `DECISIONS.md` (decisions tagged `[decision]`) |
+| `config.sh` | `CONTROL_FLAGS.md` (state), `CRON_SETUP.md` (schedule), all hardcoded commands/paths |
+| `run.sh` | `CHECKPOINT_MANAGER.sh`, old `run.sh`, quality-gate execution |
 
-`CONSTITUTION.md` stays separate on purpose: "the agent must never edit its own constitution" is a property worth one dedicated, short, unambiguous file.
+`SYSTEM.md` merges into `AGENT.md` as a clearly-marked immutable top section. Its immutability was always enforced by instruction, never by being a separate file — so a separate file bought nothing.
 
-Result: the agent reads ~5 files per tick instead of 32. Content is deduped and authored, not concatenated.
+The agent reads ~3 files per cycle instead of 32.
 
-### 2. The engine — "connect any AI system"
+---
 
-`config.yml` carries an `executor` block. `lib/run.sh` builds the invocation from it.
+## The executor — "works on top of any agent"
 
-```yaml
-executor:
-  preset: aider              # aider | claude-code | openclaw | custom
-  model: deepseek/deepseek-chat
-  # custom escape hatch (used when preset: custom):
-  # command: "claude -p 'Follow .autoeng/AGENT.md and execute one autonomous cycle.'"
+`config.sh`:
+
+```sh
+# The command that runs ONE cycle. It is invoked to read .autoeng/AGENT.md,
+# perform exactly one engineering objective, then exit.
+EXECUTOR="aider --model deepseek/deepseek-chat --yes --message-file .autoeng/AGENT.md"
+
+# Examples (any coding agent works — this string is the only adapter):
+#   claude   -> EXECUTOR="claude -p 'Follow .autoeng/AGENT.md and execute one autonomous cycle.'"
+#   openclaw -> EXECUTOR="openclaw run --message 'Follow .autoeng/AGENT.md, one cycle.'"
+
+# Quality gates. Blank = skipped (and logged). Auto-filled by `run.sh adopt`.
+GATE_BUILD="npm run build"
+GATE_LINT="npm run lint"
+GATE_TEST="npm test"
+
+# Control: enabled | paused | stop_requested | project_completed | failed
+CONTROL="enabled"
+
+# Optional tuning (defaults carried over from the current framework)
+LOCK_STALE_MIN=30
+CYCLE_TIMEOUT_MIN=15
 ```
 
-**Preset adapters shipped first: `aider`, `claude-code`, `openclaw`.**
+**Executor contract:** invoked with a working directory and an instruction to read `.autoeng/AGENT.md`, the command performs **exactly one** engineering objective and then exits. That is the entire integration surface for a new agent — no adapter code. The three "presets" from the earlier draft become the three commented example strings above; they are documentation, not code that can drift.
 
-Each preset is a small shell function that renders the harness command from `model` + a fixed instruction ("read `.autoeng/AGENT.md`, execute exactly one cycle, then exit"). `aider` is the highest-leverage preset because it already speaks Claude, DeepSeek, OpenAI, and Ollama through one adapter — that single preset delivers most of "any AI system." `claude-code` covers native Claude usage; `openclaw` preserves the current runtime so nothing regresses. Additional presets (cursor-agent, etc.) and the raw `command:` escape hatch cover everything else.
+---
 
-**Contract every executor must satisfy:** given a working directory and the instruction to read `.autoeng/AGENT.md`, it performs **exactly one** engineering objective (the cycle in AGENT.md), then exits. The framework — not the harness — owns the loop, the locking, the checkpointing, and the control-flag gating.
+## `run.sh` — the only script
 
-### 3. The loop driver
-
-`lib/run.sh` is portable and scheduler-independent:
-
-| Invocation | Behavior |
-|-----------|----------|
-| `run.sh once` | One guarded cycle: check control flag → check/refresh LOCK → git checkpoint → invoke executor → release LOCK. |
-| `run.sh loop` | Repeat `once` until the control flag ≠ `enabled`. The loop only reads the flag; the *agent* sets `control: project_completed` when it judges SUCCESS_CRITERIA met (or `failed` on unrecoverable failure), which ends the loop. This is the "long cycle, start to finish." |
-| cron entry | Calls `run.sh once`; identical guards. |
-
-Because the loop lives in the framework, it behaves identically whether the user has cron, a bare terminal, or OpenClaw. All the safety machinery (LOCK, checkpoint, stale-lock recovery, control-flag checks) runs in `run.sh` regardless of executor.
-
-### 4. Two on-ramps — one tiny CLI
-
-A single POSIX-sh `ae` command (no node/npm dependency → maximally portable):
+Subcommands (called by path, e.g. `bash .autoeng/run.sh loop` — nothing to install):
 
 | Command | Behavior |
 |---------|----------|
-| `ae init` | Greenfield. User supplies a one-paragraph goal. Seeds `config.yml` and `STATE.md` with a "Phase 0: bootstrap" objective. The agent's first cycles author `docs/ARCHITECTURE.md`, `docs/PLAN.md`, `TODO.md`, then begin building. |
-| `ae adopt` | Existing repo. Auto-detects the stack, fills `config.yml` gates, seeds `STATE.md` from a repo + TODO scan. |
-| `ae run` | Alias for `lib/run.sh once`. |
-| `ae loop` | Alias for `lib/run.sh loop`. |
-| `ae status` | Prints control state, last worklog entry, build status, lock state. |
-| `ae enable` / `ae pause` / `ae stop` | Flip the control flag in `config.yml`. |
+| `run.sh run` | One guarded cycle: control check → LOCK → checkpoint → invoke `$EXECUTOR` → re-run gates → pass: release LOCK; fail: rollback + `CONTROL=failed`. |
+| `run.sh loop` | Repeat `run` until `CONTROL != enabled`. The agent sets `CONTROL=project_completed` when it judges SUCCESS criteria met (documented in `AGENT.md`), or `run.sh` sets `failed` on unrecoverable gate failure. This is the long start-to-finish cycle. |
+| `run.sh adopt` | Best-effort (~20 lines): detect stack, write `GATE_*` defaults into `config.sh`, seed `STATE.md` from a repo/TODO scan. Convenience only — a user can skip it and fill `config.sh` by hand. |
+| `run.sh status` | Print `CONTROL`, last `WORKLOG` entry, gate/build status, LOCK state. |
+| `run.sh pause` / `run.sh stop` | Set `CONTROL` in `config.sh`. (Enable = edit the file or `CONTROL=enabled run.sh run`.) |
 
-`setup.sh` is replaced/absorbed by `ae init` and `ae adopt`.
+A cron entry just calls `run.sh run`; the same guards apply, so cron and terminal behave identically.
 
-### 5. Stack-agnostic quality gates
+**Greenfield vs existing is content, not code.** Greenfield: `adopt` (or the user) seeds `STATE.md` with a "Phase 0: bootstrap" task; the agent's first cycles author `docs/ARCHITECTURE.md`, `docs/PLAN.md`, `TODO.md`, then build. Existing: `adopt` detects the stack and seeds `STATE.md` from the repo. Same framework, no special subsystem.
 
-`config.yml`:
+**Stack auto-detection** (best-effort, in `adopt`):
 
-```yaml
-gates:
-  build:     "npm run build"     # auto-filled by init/adopt; blank = skip (logged)
-  lint:      "npm run lint"
-  typecheck: "npx tsc --noEmit"
-  test:      "npm test"
-```
-
-`lib/quality-gate.sh` runs whatever is configured; a blank value is skipped and logged. Auto-detection on `init`/`adopt`:
-
-| Detected file | Gates |
-|---------------|-------|
-| `package.json` | npm scripts + `tsc` if TS present |
+| Detected file | `GATE_*` defaults |
+|---------------|-------------------|
+| `package.json` | npm scripts (+ `tsc --noEmit` if TS) |
 | `Cargo.toml` | `cargo build` / `cargo clippy` / `cargo test` |
 | `go.mod` | `go build ./...` / `go vet` / `go test ./...` |
-| `pyproject.toml` | `ruff` / `mypy` / `pytest` |
-
-`AGENT.md` references "the gates in `config.yml`," never literal commands.
-
-### 6. Control state moves into config
-
-`CONTROL_FLAGS.md` becomes a `control:` key in `config.yml` (`enabled | paused | stop_requested | project_completed | failed`), edited by `ae enable|pause|stop` or by hand. Semantics are unchanged from `AUTONOMOUS_CONTROL.md`; they are documented in `AGENT.md`. Runtime artifacts (`LOCK`, `CHECKPOINT`, `execution.log`) remain files in `.autoeng/` and are git-ignored.
+| `pyproject.toml` | `ruff` / `pytest` |
 
 ---
 
-## Data Flow
+## Data flow
 
 ```
-ae loop / cron
+run.sh loop / cron
    │
    ▼
-lib/run.sh  ──►  read config.yml (control?, executor, gates)
-   │                 │
-   │                 ├─ control ≠ enabled ─► log + exit
-   │                 ▼
-   ├─ LOCK check (stale-lock recovery)
-   ├─ git checkpoint (lib/checkpoint.sh)
+source config.sh  ──►  CONTROL != enabled ? ──► log + exit
+   │
+   ├─ LOCK (stale-lock recovery)
+   ├─ git checkpoint
    ▼
-invoke executor (preset → harness command, any model)
+invoke $EXECUTOR  (any agent, any model)
    │
    ▼
-agent reads CONSTITUTION.md + AGENT.md + STATE.md
+agent: read AGENT.md + STATE.md → one task → implement → gates → update STATE/WORKLOG → commit
    │
    ▼
-one objective: plan → implement → lib/quality-gate.sh → self-review → commit
-   │
-   ├─ gates fail ─► FAILURE_RECOVERY (rollback to checkpoint) ─► update STATE/WORKLOG
-   └─ gates pass ─► update STATE.md, WORKLOG.md, DECISIONS.md ─► git commit
-   │
-   ▼
-release LOCK ─► run.sh loop: re-check control → next, or finish
+run.sh re-runs GATE_* itself
+   ├─ fail ─► git reset --hard <checkpoint> ─► CONTROL=failed ─► exit
+   └─ pass ─► release LOCK ─► loop re-checks CONTROL ─► next / finish
 ```
 
-## Error Handling
+## Error handling
 
-Unchanged in substance from today, relocated:
+Unchanged in substance; relocated into `run.sh` + `AGENT.md`:
 
-- **Git checkpoint before every cycle** — rollback via `git reset --hard <checkpoint>` is the primary recovery. (`lib/checkpoint.sh`, rules in `AGENT.md`.)
-- **LOCK** prevents concurrent runs; stale-lock (≥30 min) auto-recovers. (`lib/run.sh`.)
-- **Control flag** — human can pause/stop by editing `config.yml` or running `ae pause`.
-- **Failure recovery** — 3 consecutive unrecoverable failures on a task → `control: failed`, execution suspends for human review.
+- **Checkpoint before every cycle**; `git reset --hard <checkpoint>` is the primary recovery, now enforced by `run.sh` after failed gate verification.
+- **LOCK** prevents concurrent runs; stale lock (≥ `LOCK_STALE_MIN`) auto-recovers.
+- **Control flag** lets a human pause/stop by editing `config.sh` or `run.sh pause`.
+- **Unrecoverable failure** → `CONTROL=failed`, execution suspends for human review.
 - **No remote pushes** — agent commits locally only.
 
-## Testing Strategy
+## Testing strategy
 
-- **`lib/*.sh`** — unit-test with a scratch git repo fixture: checkpoint creates a baseline commit; run.sh honors control flag, creates/releases LOCK, recovers stale LOCK; quality-gate runs configured commands and skips blanks.
-- **Executor presets** — test command rendering (preset + model → expected command string) without invoking real models.
-- **`ae init` / `ae adopt`** — run against throwaway fixture repos (a Node repo, a Go repo, an empty dir); assert `config.yml` gates and `STATE.md` seed are correct.
-- **End-to-end smoke** — one real `run.sh once` against a trivial fixture project using a cheap model, asserting a commit lands and gates ran. Manual/optional in CI.
+- **`run.sh`** — against a scratch git-repo fixture: honors `CONTROL`; creates/releases LOCK; recovers stale LOCK; creates a checkpoint; **rolls back when a gate fails**; skips blank gates.
+- **Executor contract** — a fake `$EXECUTOR` (a script that edits a file) proves the loop drives it and gate-verify runs afterward, with no real model.
+- **`run.sh adopt`** — against fixture repos (Node, Go, empty dir): asserts correct `GATE_*` and `STATE.md` seed.
+- **End-to-end smoke** — one real `run.sh run` on a trivial project with a cheap model; assert a commit lands and gates ran. Manual/optional.
 
----
+## Migration path
 
-## Migration Path
+1. Author `AGENT.md` (immutable top section from `SYSTEM.md` + merged workflow) and `STATE.md` by merging existing files section-by-section — content deduped, nothing dropped.
+2. Extract every hardcoded path/command into `config.sh`; add best-effort detection to `adopt`.
+3. Rewrite `run.sh` as the single script (subcommands + safety rails + gate-verify + loop).
+4. Rewrite `README.md`; add a 3-command quickstart and a short `MIGRATION.md` for existing `agent/` users.
+5. Delete the old 32-file set (git history preserves it). No `profiles/strict/` — that would reintroduce the weight we just removed.
 
-Governance is preserved, not rewritten:
+## What changed from the first draft (the "cut the fat" pass)
 
-1. Author `CONSTITUTION.md` + `AGENT.md` by merging existing files section-by-section (content deduped, nothing dropped).
-2. Extract every hardcoded path/command into `config.yml`; add auto-detection.
-3. Write the `ae` CLI + `lib/` scripts (POSIX sh).
-4. Write the `aider`, `claude-code`, `openclaw` preset adapters + `custom` escape hatch.
-5. Rewrite `README.md`; add a short `MIGRATION.md` for existing `agent/` users.
-6. (Optional) Keep the old 32-file set under `profiles/strict/` as a reference profile.
+| Cut / changed | Reason |
+|---|---|
+| `ae` global CLI → subcommands of `run.sh` | A CLI needs an install/PATH story, which fights "easy to integrate." Called-by-path = zero install. |
+| Preset adapters as shell code → 3 example command strings | The command string is the universal adapter; per-tool code drifts and contradicts "any agent." |
+| `config.yml` → `config.sh` | YAML needs a parser; sourced sh is zero-dependency and runs anywhere. |
+| Separate `CONSTITUTION.md` → top section of `AGENT.md` | Immutability is enforced by instruction, not by file separation. |
+| Separate `DECISIONS.md` → tagged `WORKLOG.md` entries | A decision is a kind of journal entry. |
+| `lib/` + `quality-gate.sh` → folded into `run.sh` | One script is lighter and makes the trust boundary explicit. |
+| `init`/`adopt` as subsystems → content + a ~20-line detect | Greenfield vs existing is a content difference, not code. |
+| 5 files → 3 md + config + script | Further consolidation toward "lightweight." |
 
-## Rejected Alternatives
+## Open items for planning
 
-- **Build a standalone runner** (own agent loop + tool-use + API adapters). Rejected: reinvents Claude Code / aider; large surface to build and maintain. (User confirmed harness-adapter approach.)
-- **Keep all 32 files, add a runner layer on top.** Rejected: doesn't cut token cost or new-user complexity. (User confirmed consolidation.)
-- **Index file the agent reads first, keeping per-concern files.** Rejected: agent still reads them all (no token saving) and the wall of files remains.
-
-## Open Questions
-
-- Config format: `config.yml` assumes a YAML parser is available. If we want *zero* dependencies, a `config.sh` (sourced env vars) is an alternative — decide during planning. Leaning YAML for readability, with a tiny pure-sh parser or `yq`-optional fallback.
-- Exact stale-lock threshold and per-cycle timeout defaults — carry over current values (30 min lock, 15 min cycle) unless revisited.
+- Exact stale-lock threshold / cycle timeout: carry over current values (30 min / 15 min) via `config.sh`, revisit if needed.
+- Whether `run.sh adopt` should prompt-confirm detected gates or write silently (lean: write, then print what it wrote).
