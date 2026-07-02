@@ -1,162 +1,82 @@
 # Autonomous Engineer
 
-A universal autonomous engineering agent framework for AI-driven software development.
+A lightweight, dependency-free autonomous-engineering loop that drops into any repo and drives any coding agent.
 
-## What This Is
+## What it is
 
-A self-contained agent system that autonomously develops software projects through iterative cycles. Each cycle:
-- Reads project state and tracking files
-- Plans the highest-priority task
-- Implements it with quality gates (build, lint, typecheck)
-- Commits with git checkpoints (rollback-safe)
-- Updates all tracking files
+`autonomous-engineer` is a single folder (`.autoeng/`) you copy into a project. It repeatedly invokes a coding-agent CLI of your choice to plan and implement one task at a time, while a small shell driver — outside the model — owns safety: git checkpoints, gate verification, and rollback. There's no server, no database, and no language runtime required by the framework itself.
 
-The agent runs on a cron schedule and operates entirely through file-based state — no database, no external services, no state outside your git repo.
-
-## Quick Start
-
-### 1. Scaffold into your project
+## Quickstart
 
 ```bash
-# Clone this repo
-git clone https://github.com/spiridonov-oa/autonomous-engineer.git
-
-# Copy agent/ folder into your project
-cp -r autonomous-engineer/agent /path/to/your/project/agent
-
-# Or use the setup script
-bash autonomous-engineer/setup.sh /path/to/your/project
+sh install.sh /path/to/your/project                      # 1. copy .autoeng/ in
+$EDITOR /path/to/your/project/.autoeng/config.sh          # 2. set EXECUTOR + CONTROL=enabled
+cd /path/to/your/project && sh .autoeng/run.sh adopt && sh .autoeng/run.sh loop   # 3. detect stack + run
 ```
 
-### 2. Configure for your project
+Nothing to install on `PATH` — everything is called by path (`sh .autoeng/run.sh ...`).
 
-Edit these files to match your project:
+## How it works
 
-| File | What to Change |
-|------|----------------|
-| `agent/SYSTEM.md` | Replace `{{PROJECT_NAME}}` with your project name |
-| `agent/AUTONOMOUS_ENGINEER.md` | Replace `{{PROJECT_NAME}}`, update mission statement |
-| `agent/CONTROL_FLAGS.md` | Replace `{{PROJECT_NAME}}`, set state to `ENABLED` |
-| `agent/PROJECT_STATUS.md` | Define your project phases and progress |
-| `agent/NEXT_TASK.md` | Set your first task |
-| `agent/TASK_QUEUE.md` | Populate with your task list |
-| `agent/SUCCESS_CRITERIA.md` | Define what "done" means for your project |
-| `agent/CRON_SETUP.md` | Configure cron job for your OpenClaw setup |
+Each cycle is split across a hard trust boundary: `run.sh` is a plain shell script that never trusts model output, and the executor (your coding agent) does the actual engineering work.
 
-### 3. Create project-specific docs
+| `run.sh` does (outside the model) | The agent does (inside `$EXECUTOR`) |
+|---|---|
+| Check `CONTROL` is `enabled` | Read `.autoeng/AGENT.md` for the operating manual |
+| Acquire `LOCK` (stale locks auto-recover) | Plan exactly one task |
+| Create a git checkpoint | Implement it |
+| Invoke `$EXECUTOR` | Run the quality gates itself |
+| Re-run `GATE_BUILD` / `GATE_LINT` / `GATE_TEST` independently | Commit the result |
+| On executor error or gate failure: `git reset --hard` + `git clean -fd`, set `CONTROL=failed` | |
+| On success: land any remaining validated work, release `LOCK` | |
+| Repeat (`loop`) while `CONTROL=enabled` | |
 
-The agent expects these files in your project root:
+The agent never has to be trusted to gate its own work — `run.sh` re-checks everything before letting a cycle stand.
 
-```
-your-project/
-├── agent/              ← this framework
-├── docs/
-│   ├── ARCHITECTURE.md ← system design source of truth
-│   └── PLAN.md         ← phased plan, timeline
-├── TODO.md             ← implementation checklist
-└── ...your source code
-```
+## Configuring the executor (any agent)
 
-### 4. Set up the cron job
+`EXECUTOR` in `.autoeng/config.sh` is the only adapter. It's a plain command string, invoked from the project root, that should read `.autoeng/AGENT.md`, perform exactly one engineering objective, then exit. Any coding-agent CLI works. From `.autoeng/config.sh`:
 
-See `agent/CRON_SETUP.md` for OpenClaw cron configuration. The agent runs as an isolated cron job.
-
-### 5. Enable and go
-
-Set `agent/CONTROL_FLAGS.md` to `ENABLED` and the agent starts working on next cron tick.
-
-## How It Works
-
-```
-┌─────────────────────────────────────────────────┐
-│                  Cron Tick                        │
-│                                                   │
-│  1. Check CONTROL_FLAGS.md → ENABLED?             │
-│  2. Check LOCK → not running?                     │
-│  3. Create git checkpoint (rollback baseline)     │
-│  4. Read all tracking files + project docs        │
-│  5. Plan: analyze git diff, select highest task   │
-│  6. Execute: implement task (edit, write, code)   │
-│  7. Validate: build, lint, typecheck               │
-│  8. If fail: FAILURE_RECOVERY (rollback if needed)│
-│  9. If pass: SELF_REVIEW → QUALITY_GATE            │
-│ 10. Update tracking files + git commit             │
-│ 11. Remove LOCK                                   │
-│ 12. Exit                                          │
-└─────────────────────────────────────────────────┘
+```bash
+#   aider     EXECUTOR="aider --model deepseek/deepseek-chat --yes --message-file .autoeng/AGENT.md"
+#   claude    EXECUTOR="claude -p 'Follow .autoeng/AGENT.md and execute one autonomous cycle.'"
+#   openclaw  EXECUTOR="openclaw run --message 'Follow .autoeng/AGENT.md, one cycle.'"
 ```
 
-## File Structure
+aider in particular already speaks Claude, DeepSeek, OpenAI, and Ollama out of the box, so swapping models is just a flag change — no framework changes needed.
 
-```
-agent/
-├── SYSTEM.md              ← Immutable foundational rules (DO NOT EDIT during runs)
-├── AUTONOMOUS_ENGINEER.md  ← Orchestrator — workflow strategy
-├── RUNBOOK.md              ← Entry point — exact execution sequence
-├── CONTROL_FLAGS.md       ← ENABLED / PAUSED / STOP_REQUESTED / FAILED
-├── AUTONOMOUS_CONTROL.md  ← State machine for control flags
-├── PLANNING_ENGINE.md     ← Task discovery, selection, prioritization
-├── EXECUTION_CYCLE.md     ← 20-phase execution lifecycle
-├── EXECUTION_RULES.md     ← Rules governing execution behavior
-├── EXECUTION_TIMEOUT.md   ← Time budget management
-├── TASK_SIZE_POLICY.md    ← S/M/L task sizing constraints
-├── QUALITY_GATE.md        ← Build/lint/typecheck validation
-├── REVIEW_CHECKLIST.md    ← Pre-commit review checklist
-├── SELF_REVIEW.md         ← Post-implementation self-review
-├── CHECKLIST.md           ← General execution checklist
-├── FAILURE_RECOVERY.md    ← Error handling, rollback, retry
-├── GIT_SAFETY.md          ← Git operations safety rules
-├── DIFF_PLANNING.md       ← Diff-aware planning strategy
-├── TERMINATION_POLICY.md  ← When to stop running
-├── SUCCESS_CRITERIA.md    ← Define project completion
-├── FINAL_SHUTDOWN.md      ← Clean shutdown procedure
-├── CRON_SETUP.md          ← OpenClaw cron job configuration
-├── CHECKPOINT_MANAGER.sh ← Git checkpoint script
-├── run.sh                 ← Manual run script
-│
-├── PROJECT_STATUS.md      ← Current project state (updated each run)
-├── NEXT_TASK.md           ← Single highest-priority task (updated each run)
-├── TASK_QUEUE.md          ← Full prioritized task list
-├── BLOCKERS.md            ← Active blockers
-├── TECH_DEBT.md           ← Technical debt tracker
-├── RISK_REGISTER.md       ← Project risks
-├── DECISIONS.md           ← Architecture decision log (append-only)
-├── WORKLOG.md             ← Chronological execution log (append-only)
-├── CHECKPOINT             ← Last checkpoint hash (auto-generated)
-└── LOCK                   ← Run lock (auto-created/removed)
-```
+## The files
 
-## Safety Features
+`.autoeng/` contains exactly six files:
 
-- **Git checkpoints** — every run starts with a baseline commit for rollback
-- **LOCK file** — prevents concurrent runs
-- **Control flags** — human can pause/stop at any time via a single file
-- **Quality gates** — build + lint + typecheck must pass before commit
-- **Failure recovery** — automatic rollback on 3 consecutive build failures
-- **No remote pushes** — agent never pushes to remote, only commits locally
-- **File-based state** — all state lives in your git repo, fully auditable
+| File | Purpose |
+|---|---|
+| `AGENT.md` | Operating manual — the agent reads this every cycle |
+| `STATE.md` | Working memory — status, next task, task queue, blockers |
+| `WORKLOG.md` | Append-only journal, one entry per cycle |
+| `config.sh` | The only file you edit — `EXECUTOR`, gates, `CONTROL`, tuning |
+| `run.sh` | The single driver — `run`, `loop`, `adopt`, `status`, `pause`, `stop` |
+| `.gitignore` | Ignores runtime artifacts (`LOCK`, `CHECKPOINT`, `execution.log`) |
+
+## Greenfield vs existing
+
+- **Existing repo**: `sh .autoeng/run.sh adopt` detects your stack (`package.json` → npm, `Cargo.toml` → cargo, `go.mod` → go, `pyproject.toml` → ruff/pytest), fills in `GATE_BUILD`/`GATE_LINT`/`GATE_TEST`, and seeds `STATE.md`.
+- **New project**: skip `adopt`. Set the mission in `AGENT.md` §2 (what the project is, who it's for, what "done" looks like), and seed a "Phase 0: bootstrap" task in `STATE.md`'s task queue.
+
+## Safety
+
+- **Git checkpoint per cycle** — every cycle starts from a committed baseline.
+- **Independent gate re-run** — `run.sh` re-runs `GATE_BUILD`/`GATE_LINT`/`GATE_TEST` itself; it doesn't take the executor's word for it.
+- **Rollback on failure** — executor errors or gate failures trigger `git reset --hard` + `git clean -fd` back to the checkpoint, and `CONTROL` is set to `failed`.
+- **LOCK** — prevents concurrent runs; a lock older than `LOCK_STALE_MIN` is treated as crashed and auto-recovered.
+- **`CONTROL` flag** — pause or stop at any time (`sh .autoeng/run.sh pause` / `stop`), checked before every cycle.
+- **No remote pushes** — the framework only commits locally, never pushes.
+- **Validated work is landed** — on a passing cycle, any remaining uncommitted changes are committed so nothing is lost.
 
 ## Requirements
 
-- **OpenClaw** — the agent runs as an OpenClaw cron job with `agentTurn` payload
-- **Git** — project must be a git repo
-- **Node.js** — for build/lint/typecheck validation (configurable in QUALITY_GATE.md)
-- **LLM model** — any model supported by OpenClaw (tested with GLM 5.2)
+- Git
+- A POSIX shell
+- Any coding-agent CLI you point `EXECUTOR` at
 
-## Customization
-
-The framework is designed to be project-agnostic. Key customization points:
-
-1. **Quality gates** (`QUALITY_GATE.md`) — change build/lint/test commands to match your stack
-2. **Task sizing** (`TASK_SIZE_POLICY.md`) — adjust S/M/L limits for your complexity
-3. **Success criteria** (`SUCCESS_CRITERIA.md`) — define what "done" means
-4. **Planning** (`PLANNING_ENGINE.md`) — customize task discovery for your workflow
-5. **Timeouts** (`EXECUTION_TIMEOUT.md`) — tune for your model speed
-
-## License
-
-MIT — use freely, share with friends, build cool stuff.
-
-## Origin
-
-Extracted from the [IQ Assessor](https://github.com/spiridonov-oa/iq-assessor) project, where this framework autonomously implemented Phase 1 (MVP) and Phase 2 (Backend) over 17+ successful runs.
+The framework itself needs no language runtime — the quality gates run whatever your project already uses (npm, cargo, go, pytest, etc.).
