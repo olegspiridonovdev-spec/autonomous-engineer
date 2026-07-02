@@ -88,6 +88,7 @@ assert_contains() { # file substring message
 # Create an isolated git repo with .autoeng/ copied in and a test-friendly config.
 # Sets $SANDBOX to the repo path and cd's into it.
 setup_repo() {
+  [ -n "${SANDBOX:-}" ] && rm -rf "$SANDBOX"   # clean prior sandbox on repeated calls
   SANDBOX="$(mktemp -d)"
   cp -r "$REPO_ROOT/.autoeng" "$SANDBOX/.autoeng"
   cd "$SANDBOX" || exit 1
@@ -97,8 +98,9 @@ setup_repo() {
   echo "seed" > seed.txt
   git add -A && git commit -qm "seed"
   # Overwrite config for tests: executor = fake, gate = BUILD_OK sentinel.
+  # Single-quote the path so a space in REPO_ROOT survives later `sh -c "$EXECUTOR"`.
   cat > .autoeng/config.sh <<EOF
-EXECUTOR="sh $REPO_ROOT/tests/fake-executor.sh"
+EXECUTOR="sh '$REPO_ROOT/tests/fake-executor.sh'"
 GATE_BUILD="test -f BUILD_OK"
 GATE_LINT=""
 GATE_TEST=""
@@ -481,7 +483,7 @@ teardown_repo
 exit "$TESTS_FAILED"
 ```
 
-(The first `setup_repo`'s teardown is handled by the second `setup_repo` reusing the process; final `teardown_repo` cleans up.)
+(`setup_repo` removes any prior sandbox as its first line, so the second call cleans up the first; the final `teardown_repo` removes the second.)
 
 - [ ] **Step 2: Run it to confirm it fails**
 
