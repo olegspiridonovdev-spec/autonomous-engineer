@@ -124,11 +124,24 @@ cmd_loop() {
   done
 }
 
+cmd_status() {
+  cd "$PROJECT_ROOT"; load_config
+  echo "control: $CONTROL"
+  echo "executor: ${EXECUTOR:-(unset)}"
+  if [ -f "$AE_DIR/LOCK" ]; then echo "lock: present"; else echo "lock: none"; fi
+  echo "last worklog:"; tail -n 3 "$AE_DIR/WORKLOG.md" 2>/dev/null || echo "  (none)"
+}
+cmd_pause() { cd "$PROJECT_ROOT"; load_config; set_control "paused"; }
+cmd_stop()  { cd "$PROJECT_ROOT"; load_config; set_control "stop_requested"; }
+
 main() {
   cmd="${1:-run}"; [ $# -gt 0 ] && shift || true
   case "$cmd" in
     run)  cmd_run "$@" ;;
     loop) cmd_loop "$@" ;;
+    status) cmd_status "$@" ;;
+    pause)  cmd_pause  "$@" ;;
+    stop)   cmd_stop   "$@" ;;
     *)    echo "usage: run.sh run|loop|adopt|status|pause|stop" >&2; exit 2 ;;
   esac
 }
