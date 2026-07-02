@@ -373,9 +373,11 @@ Create `tests/test_lock.sh`:
 # shellcheck disable=SC1091
 . ./helpers.sh
 
-# Case A: a fresh LOCK blocks the run.
+# Case A: a fresh LOCK blocks the run. Must write a fresh `epoch:` field —
+# lock_acquire keys staleness off epoch, so a timestamp-only lock parses as
+# epoch 0 and would be wrongly treated as stale.
 setup_repo
-printf 'LOCKED\ntimestamp: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > .autoeng/LOCK
+printf 'LOCKED\nepoch: %s\n' "$(date +%s)" > .autoeng/LOCK
 FE_MARKER=1 sh .autoeng/run.sh run > out.log 2>&1 || true
 assert_file_absent ".autoeng/EXECUTOR_RAN" "fresh lock blocks executor"
 assert_contains "out.log" "another run" "logs that a run is active"
@@ -430,7 +432,7 @@ Then update `cmd_run` — replace the `log "control enabled ..."` line with:
 ```sh
   lock_acquire || return 0
   log "control enabled — starting cycle (executor not yet wired)"
-  # NOTE: temporary marker so lock tests can observe execution; removed in Task 7.
+  # NOTE: temporary marker so lock tests can observe execution; removed in Task 6.
   [ "${FE_MARKER:-0}" = 1 ] && : > "$AE_DIR/EXECUTOR_RAN"
   lock_release
   return 0
