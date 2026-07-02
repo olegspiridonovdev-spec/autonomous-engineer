@@ -96,6 +96,8 @@ setup_repo() {
   git config user.email test@test.local
   git config user.name test
   echo "seed" > seed.txt
+  # Test scratch (redirected command output) must not dirty the sandbox tree.
+  printf 'out.log\n' > .gitignore
   git add -A && git commit -qm "seed"
   # Overwrite config for tests: executor = fake, gate = BUILD_OK sentinel.
   # Single-quote the path so a space in REPO_ROOT survives later `sh -c "$EXECUTOR"`.
@@ -627,15 +629,29 @@ Now replace the body of `cmd_run` (everything after `checkpoint_create`) with th
 
 Remove the temporary `EXECUTOR_RAN` marker line and the "not yet wired" log. (Lock/checkpoint tests still pass because they no longer depend on the marker — verify in Step 4.)
 
-Because the marker is gone, update `tests/test_lock.sh` Case B to assert on the log instead of the marker: change `assert_file_exists ".autoeng/EXECUTOR_RAN" "stale lock recovered, executor ran"` to:
+Because the marker is gone, `tests/test_lock.sh` must assert on the log instead of the `EXECUTOR_RAN` file. Replace the ENTIRE contents of `tests/test_lock.sh` with this final version:
+
 ```sh
-assert_contains "out.log" "invoking executor" "stale lock recovered, executor ran"
-```
-and in Case A change `assert_file_absent ".autoeng/EXECUTOR_RAN" ...` to:
-```sh
+# shellcheck disable=SC1091
+. ./helpers.sh
+
+# Case A: a fresh LOCK blocks the run.
+setup_repo
+printf 'LOCKED\nepoch: %s\n' "$(date +%s)" > .autoeng/LOCK
+FE_MARKER=1 sh .autoeng/run.sh run > out.log 2>&1 || true
 assert_contains "out.log" "another run" "fresh lock blocks executor"
+teardown_repo
+
+# Case B: a stale LOCK (old epoch) is recovered and the run proceeds.
+setup_repo
+printf 'LOCKED\nepoch: 100\n' > .autoeng/LOCK   # epoch 100 = 1970, always stale
+FE_MARKER=1 sh .autoeng/run.sh run > out.log 2>&1 || true
+assert_contains "out.log" "invoking executor" "stale lock recovered, executor ran"
+assert_contains "out.log" "stale lock" "logs stale-lock recovery"
+teardown_repo
+
+exit "$TESTS_FAILED"
 ```
-(Case A already asserts that; keep a single assertion.) Set both fake-executor calls in `test_lock.sh` to use `FE_MARKER=1` still — harmless.
 
 - [ ] **Step 4: Run the tests to confirm they pass**
 
