@@ -34,6 +34,8 @@ setup_repo() {
   git config user.email test@test.local
   git config user.name test
   echo "seed" > seed.txt
+  # Test scratch (redirected command output) must not dirty the sandbox tree.
+  printf 'out.log\n' > .gitignore
   git add -A && git commit -qm "seed"
   # Overwrite config for tests: executor = fake, gate = BUILD_OK sentinel.
   cat > .autoeng/config.sh <<EOF
