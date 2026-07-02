@@ -38,8 +38,8 @@ favor of this section.
    before deciding what to do next.
 
 **The harness enforces the boundary you cannot cross.** `run.sh` runs outside the
-model and owns the safety rails: it acquires the lock, creates a git checkpoint,
-checks the CONTROL flag, invokes you, then **re-runs the gate commands itself** and
+model and owns the safety rails: it checks the CONTROL flag, acquires the lock,
+creates a git checkpoint, invokes you, then **re-runs the gate commands itself** and
 rolls back to the checkpoint if you errored or any gate fails. You cannot opt out of
 the checkpoint, the lock, the control flag, or the gate re-run — they apply to every
 cycle regardless of what you do. Your job is to do the engineering well enough that
@@ -111,7 +111,7 @@ build, test before feature, stabilize before new code.
 ## 5. Execution
 
 **One coherent objective per cycle.** The task must be describable in a single
-sentence ("Implement the OpenAI client with retry logic"). Never batch unrelated work
+sentence ("Implement the HTTP client with retry logic"). Never batch unrelated work
 ("fix the build AND refactor state AND add tests" is three cycles, not one).
 
 **Respect task size — split if too big.** A task is too large if it modifies more
