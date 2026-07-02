@@ -11,6 +11,8 @@ n=0; [ -f "$COUNT_FILE" ] && n=$(cat "$COUNT_FILE"); n=$((n + 1)); echo "$n" > "
 
 [ "${FE_MARKER:-0}" = 1 ] && : > .autoeng/EXECUTOR_RAN
 [ "${FE_BREAK:-0}" = 1 ] && rm -f BUILD_OK
+[ "${FE_UNTRACKED:-0}" = 1 ] && echo "junk" > untracked_junk.txt
+[ "${FE_EDIT_NOCOMMIT:-0}" = 1 ] && echo "uncommitted $n" >> seed.txt
 
 if [ "${FE_EDIT:-0}" = 1 ]; then
   echo "work $n" >> work.txt

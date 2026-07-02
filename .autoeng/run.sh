@@ -52,8 +52,9 @@ checkpoint_create() {
 checkpoint_rollback() {
   cp="$(cat "$AE_DIR/CHECKPOINT" 2>/dev/null || true)"
   [ -n "$cp" ] || { log "rollback: no checkpoint recorded"; return 1; }
-  git reset --hard "$cp" >/dev/null 2>&1
-  log "rollback: reset to $cp"
+  git reset --hard "$cp" >/dev/null 2>&1 || { log "rollback: git reset failed"; return 1; }
+  git clean -fd >/dev/null 2>&1 || true
+  log "rollback: reset to $cp (untracked cleaned)"
 }
 
 set_control() { # new_state
@@ -94,15 +95,21 @@ cmd_run() {
 
   if ! invoke_executor; then
     log "executor error — rolling back"
-    checkpoint_rollback; set_control "failed"; lock_release; return 1
+    checkpoint_rollback || log "rollback FAILED — manual recovery may be needed"
+    set_control "failed"; lock_release; return 1
   fi
 
   if run_gates; then
+    if [ -n "$(git status --porcelain)" ]; then
+      git add -A && git commit -q -m "[autoeng] cycle result $(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
+      log "landed cycle result"
+    fi
     log "gate passed — cycle complete"
     lock_release; return 0
   else
     log "gate failed — rolling back to checkpoint"
-    checkpoint_rollback; set_control "failed"; lock_release; return 1
+    checkpoint_rollback || log "rollback FAILED — manual recovery may be needed"
+    set_control "failed"; lock_release; return 1
   fi
 }
 
