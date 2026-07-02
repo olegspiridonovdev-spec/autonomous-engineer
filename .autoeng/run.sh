@@ -39,6 +39,23 @@ lock_acquire() {
 
 lock_release() { rm -f "$AE_DIR/LOCK"; }
 
+checkpoint_create() {
+  if [ -n "$(git status --porcelain)" ]; then
+    git add -A
+    git commit -q -m "[autoeng checkpoint] $(date -u +%Y-%m-%dT%H:%M:%SZ)" || true
+    log "checkpoint: committed pending changes"
+  fi
+  git rev-parse HEAD > "$AE_DIR/CHECKPOINT"
+  log "checkpoint: $(git rev-parse --short HEAD)"
+}
+
+checkpoint_rollback() {
+  cp="$(cat "$AE_DIR/CHECKPOINT" 2>/dev/null || true)"
+  [ -n "$cp" ] || { log "rollback: no checkpoint recorded"; return 1; }
+  git reset --hard "$cp" >/dev/null 2>&1
+  log "rollback: reset to $cp"
+}
+
 cmd_run() {
   cd "$PROJECT_ROOT"
   load_config
@@ -47,6 +64,7 @@ cmd_run() {
     return 0
   fi
   lock_acquire || return 0
+  checkpoint_create
   log "control enabled — starting cycle (executor not yet wired)"
   # NOTE: temporary marker so lock tests can observe execution; removed in Task 6.
   [ "${FE_MARKER:-0}" = 1 ] && : > "$AE_DIR/EXECUTOR_RAN"
