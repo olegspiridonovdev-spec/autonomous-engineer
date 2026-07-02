@@ -113,10 +113,22 @@ cmd_run() {
   fi
 }
 
+cmd_loop() {
+  while : ; do
+    cd "$PROJECT_ROOT"; load_config
+    if [ "$CONTROL" != "enabled" ]; then
+      log "loop: control is '$CONTROL' — stopping"
+      break
+    fi
+    cmd_run || { log "loop: cycle failed — stopping"; break; }
+  done
+}
+
 main() {
   cmd="${1:-run}"; [ $# -gt 0 ] && shift || true
   case "$cmd" in
     run)  cmd_run "$@" ;;
+    loop) cmd_loop "$@" ;;
     *)    echo "usage: run.sh run|loop|adopt|status|pause|stop" >&2; exit 2 ;;
   esac
 }
