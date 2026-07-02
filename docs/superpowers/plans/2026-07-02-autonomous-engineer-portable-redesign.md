@@ -1288,4 +1288,18 @@ git commit -m "refactor: remove legacy 32-file agent/ framework; .autoeng/ is no
 - **Control-state single source of truth:** `CONTROL` lives only in `config.sh`; `set_control`/`cmd_pause`/`cmd_stop` all edit it via the same `sed` form; `load_config` re-reads it every cycle (Task 8 loop relies on this).
 - **Naming consistency:** `checkpoint_create`/`checkpoint_rollback`, `lock_acquire`/`lock_release`, `run_gates`, `invoke_executor`, `set_control`, `set_gate`, `cmd_run`/`cmd_loop`/`cmd_adopt`/`cmd_status`/`cmd_pause`/`cmd_stop` are used identically across every task that references them.
 - **Marker cleanup:** the temporary `EXECUTOR_RAN` marker introduced in Task 4 is removed in Task 6, and the two dependent assertions in `test_lock.sh` are migrated to log-based assertions in the same task.
+
+---
+
+## Post-review hardening (applied during execution)
+
+Adversarial code review of the Task 6 trust boundary surfaced three real defects that were fixed in commit `52b5378` (with regression tests). These deltas supersede the original Task 5/6 code blocks above:
+
+1. **Rollback must survive its own failure (Critical).** In `cmd_run`, both failure branches call `checkpoint_rollback || log "rollback FAILED — manual recovery may be needed"` so a non-zero rollback can't abort cleanup under `set -e`; `set_control "failed"` and `lock_release` always run.
+2. **Rollback must remove untracked leftovers (Critical).** `checkpoint_rollback` now runs `git clean -fd` after `git reset --hard` (respects `.gitignore`, so runtime artifacts are preserved), preventing executor-created untracked files from landing on the next cycle.
+3. **Land validated work (Important).** On gate success, `cmd_run` commits any remaining dirty tree (`git add -A && git commit -m "[autoeng] cycle result …"`) before releasing the lock, so gate-passing edits an executor left uncommitted are never silently lost.
+
+Test support added: `tests/fake-executor.sh` gained `FE_UNTRACKED` and `FE_EDIT_NOCOMMIT` knobs; `tests/test_gate_rollback.sh` gained a second case (untracked cleanup); `tests/test_land.sh` is new (landing-commit durability).
+
+Deferred as follow-ups (non-blocking, noted for a later pass): `set_control` does not verify its `sed` matched or escape non-enum values (Minor — current call sites pass fixed enum states); `run_gates` sends failing-gate output to `/dev/null` (Minor — operability: a failed gate logs *that* it failed but not *why*).
 ```
