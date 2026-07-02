@@ -90,7 +90,12 @@ cmd_run() {
     log "control is '$CONTROL' — not enabled, skipping run"
     return 0
   fi
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || {
+    log "ERROR: $PROJECT_ROOT is not a git repository — run 'git init' first"
+    return 1
+  }
   lock_acquire || return 0
+  trap 'lock_release' EXIT
   checkpoint_create
 
   if ! invoke_executor; then

@@ -61,7 +61,7 @@ aider in particular already speaks Claude, DeepSeek, OpenAI, and Ollama out of t
 ## Greenfield vs existing
 
 - **Existing repo**: `sh .autoeng/run.sh adopt` detects your stack (`package.json` → npm, `Cargo.toml` → cargo, `go.mod` → go, `pyproject.toml` → ruff/pytest), fills in `GATE_BUILD`/`GATE_LINT`/`GATE_TEST`, and seeds `STATE.md`.
-- **New project**: skip `adopt`. Set the mission in `AGENT.md` §2 (what the project is, who it's for, what "done" looks like), and seed a "Phase 0: bootstrap" task in `STATE.md`'s task queue.
+- **New project**: skip `adopt`. Set the mission in `AGENT.md` §2 (what the project is, who it's for, what "done" looks like), and seed a "Phase 0: bootstrap" task in `STATE.md`'s task queue; the project directory must already be a git repo, so run `git init` first if it isn't.
 
 ## Safety
 
